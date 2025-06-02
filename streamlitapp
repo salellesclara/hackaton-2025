@@ -1,0 +1,206 @@
+
+# Import required libraries
+import streamlit as st
+from snowflake.snowpark.context import get_active_session
+import pydeck as pdk
+import pandas as pd
+import json
+from snowflake.snowpark.functions import avg
+
+
+
+st.title("Shelter Locator Map")
+
+# Get Snowflake session
+session = get_active_session()
+
+# Query only shelters in LA and MS with valid coordinates and needed fields
+query = """
+SELECT
+    SHELTER_NAME,
+    ADDRESS_1,
+    CITY,
+    COUNTY_PARISH,
+    STATE,
+    ZIP,
+    ORG_POC_NAME,
+    ORG_POC_PHONE,
+    ORG_POC_EMAIL,
+    LATITUDE,
+    LONGITUDE,
+    SHELTER_STATUS_CODE,
+    EVACUATION_CAPACITY
+FROM DATAOPS_EVENT_PROD.HACKATHON_DATASETS.NATIONAL_SHELTER_FACILITIES
+WHERE STATE IN ('LA', 'MS')
+  AND LATITUDE IS NOT NULL
+  AND LONGITUDE IS NOT NULL
+"""
+df = session.sql(query).to_pandas()
+
+
+st.sidebar.header("Filter Shelters")
+
+#age
+user_age = st.number_input("Enter your age", min_value=0, max_value=120, value=30)
+
+# Filter by state
+state_options = sorted(df["STATE"].dropna().unique())
+selected_state = st.sidebar.selectbox("Select State", ["All"] + state_options)
+
+# Filter by city 
+city_options = sorted(df["CITY"].dropna().unique())
+selected_city = st.sidebar.selectbox("Select City", ["All"] + city_options)
+
+# Filter by shelter status 
+status_options = sorted(df["SHELTER_STATUS_CODE"].dropna().unique())
+selected_status = st.sidebar.selectbox("Select Shelter Status", ["All"] + status_options)
+
+
+filtered_df = df.copy()
+if selected_state != "All":
+    filtered_df = filtered_df[filtered_df["STATE"] == selected_state]
+if selected_city != "All":
+    filtered_df = filtered_df[filtered_df["CITY"] == selected_city]
+if selected_status != "All":
+    filtered_df = filtered_df[filtered_df["SHELTER_STATUS_CODE"] == selected_status]
+
+# show contact infromation if click 
+tooltip = {
+    "html": """
+    <b>{SHELTER_NAME}</b><br/>
+    {ADDRESS_1}, {CITY}, {STATE} {ZIP}<br/>
+    📞 {ORG_POC_PHONE}<br/>
+    ✉️ {ORG_POC_EMAIL}<br/>
+    👤 {ORG_POC_NAME}
+    """,
+    "style": {
+        "backgroundColor": "steelblue",
+        "color": "white"
+    },
+}
+
+# Map layer with red dots
+# Scatterplot for individual shelters
+scatter_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=filtered_df,
+    get_position='[LONGITUDE, LATITUDE]',
+    get_radius="EVACUATION_CAPACITY",
+    get_fill_color=[0, 128, 255, 180],
+    pickable=True,
+)
+
+# Heatmap layer for density of shelters
+heatmap_layer = pdk.Layer(
+    "HeatmapLayer",
+    data=filtered_df,
+    get_position='[LONGITUDE, LATITUDE]',
+    aggregation='MEAN',
+    threshold=0.1,
+)
+# Load hurricane tracks from Snowflake
+hurricane_tracks = session.table('DATAOPS_EVENT_PROD.HACKATHON_DATASETS.HURRICANE_TRACKS')
+hurricane_trackspd = hurricane_tracks.to_pandas()
+
+# Convert GEO string to coordinate arrays
+hurricane_trackspd["GEO"] = hurricane_trackspd["GEO"].apply(lambda row: json.loads(row)["coordinates"])
+
+
+# Hurricane path layer
+tracks_layer = pdk.Layer(
+    type="PathLayer",
+    data=hurricane_trackspd,
+    pickable=True,
+    get_color=[170, 74, 68],
+    width_scale=5,
+    opacity=1,
+    width_min_pixels=5,
+    get_path="GEO",
+    get_width=200,
+)
+
+# Combine both layers
+layers = [heatmap_layer, scatter_layer, tracks_layer]
+
+
+
+# Dynamically set view based on selection
+if selected_city != "All" and not filtered_df.empty:
+    city_lat = filtered_df["LATITUDE"].mean()
+    city_lon = filtered_df["LONGITUDE"].mean()
+    zoom_level = 10  # closer zoom for cities
+else:
+    city_lat = 32.0
+    city_lon = -90.0
+    zoom_level = 6.5  # regional view for LA/MS
+
+view_state = pdk.ViewState(
+    latitude=city_lat,
+    longitude=city_lon,
+    zoom=zoom_level,
+    pitch=0,
+)
+
+# show
+col1, col2 = st.columns([2, 1]) 
+
+with col1:
+    st.subheader("🗺️ Shelter Map with Impact Heatmap")
+    st.pydeck_chart(pdk.Deck(
+        layers=layers,
+        initial_view_state=view_state,
+        tooltip=tooltip,
+        map_style="mapbox://styles/mapbox/light-v9"
+    ))
+
+
+with col2:
+    st.subheader("Shelter Names")
+
+    names = filtered_df["SHELTER_NAME"].dropna().tolist()
+
+    if names:
+        # Build custom HTML table
+        table_html = """
+        <style>
+        .custom-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 16px;
+        }
+        .custom-table th, .custom-table td {
+            text-align: left;
+            padding: 8px 12px;
+            border-bottom: 1px solid #ddd;
+        }
+        .custom-table th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        </style>
+        <table class="custom-table">
+            <tr><th>Shelter Name</th></tr>
+        """
+
+        for name in names:
+            table_html += f"<tr><td>{name}</td></tr>"
+
+        table_html += "</table>"
+
+        st.markdown(table_html, unsafe_allow_html=True)
+
+    else:
+        st.info("No shelters match the selected filters.")
+
+
+
+
+
+
+
+
+
+
+
+ 
+
